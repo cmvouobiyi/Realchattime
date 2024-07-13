@@ -20,3 +20,258 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat et Appel Vidéo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            border: 1px solid #ccc;
+            overflow-y: auto;
+        }
+        #message-input {
+            display: flex;
+            padding: 10px;
+            border-top: 1px solid #ccc;
+        }
+        #message-input input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+        #message-input button {
+            padding: 10px;
+            border: none;
+            background-color: #28a745;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #video-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 50vh;
+            border-bottom: 1px solid #ccc;
+        }
+        #localVideo, #remoteVideo {
+            width: 45%;
+            margin: 10px;
+        }
+        #call-buttons {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+        #call-buttons button {
+            padding: 10px;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            border-radius: 4px;
+            margin: 0 5px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="video-container">
+        <video id="localVideo" autoplay muted></video>
+        <video id="remoteVideo" autoplay></video>
+    </div>
+    <div id="call-buttons">
+        <button onclick="startCall(true)">Appel Vidéo</button>
+        <button onclick="startCall(false)">Appel Vocal</button>
+    </div>
+    <div id="chat-container"></div>
+    <div id="message-input">
+        <input type="text" id="message" placeholder="Type your message..." />
+        <button onclick="sendMessage()">Send</button>
+    </div>
+
+    <!-- Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/8.7.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.7.1/firebase-firestore.js"></script>
+
+    <!-- WebRTC -->
+    <script>
+        // Remplacez les valeurs ci-dessous par celles de votre propre configuration Firebase
+        var firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_AUTH_DOMAIN",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_STORAGE_BUCKET",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+        // Initialiser Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        // Référencer la collection des messages
+        const messagesRef = db.collection('messages');
+
+        // Écouter les messages en temps réel
+        messagesRef.orderBy('timestamp').onSnapshot(snapshot => {
+            const chatContainer = document.getElementById('chat-container');
+            chatContainer.innerHTML = '';
+            snapshot.forEach(doc => {
+                const message = doc.data();
+                const messageElement = document.createElement('div');
+                messageElement.textContent = `${message.name}: ${message.text}`;
+                chatContainer.appendChild(messageElement);
+            });
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        });
+
+        // Envoyer un nouveau message
+        function sendMessage() {
+            const messageInput = document.getElementById('message');
+            const messageText = messageInput.value.trim();
+            if (messageText !== '') {
+                messagesRef.add({
+                    name: 'User',  // Vous pouvez personnaliser avec le nom de l'utilisateur connecté
+                    text: messageText,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+                messageInput.value = '';
+            }
+        }
+
+        // WebRTC configuration
+        const servers = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        };
+
+        let localStream;
+        let remoteStream;
+        let peerConnection;
+
+        // Start video/audio call
+        async function startCall(video) {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: video, audio: true });
+            remoteStream = new MediaStream();
+
+            document.getElementById('localVideo').srcObject = localStream;
+            document.getElementById('remoteVideo').srcObject = remoteStream;
+
+            peerConnection = new RTCPeerConnection(servers);
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            peerConnection.ontrack = event => {
+                event.streams[0].getTracks().forEach(track => {
+                    remoteStream.addTrack(track);
+                });
+            };
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    db.collection('calls').doc('offer').set({
+                        type: 'offer',
+                        sdp: peerConnection.localDescription.sdp,
+                        ice: event.candidate
+                    });
+                }
+            };
+
+            const offerDescription = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offerDescription);
+
+            db.collection('calls').doc('offer').set({
+                type: 'offer',
+                sdp: offerDescription.sdp
+            });
+
+            db.collection('calls').doc('answer').onSnapshot(async snapshot => {
+                const data = snapshot.data();
+                if (!peerConnection.currentRemoteDescription && data && data.sdp) {
+                    const answerDescription = new RTCSessionDescription({
+                        type: 'answer',
+                        sdp: data.sdp
+                    });
+                    await peerConnection.setRemoteDescription(answerDescription);
+                }
+            });
+
+            db.collection('calls').doc('ice-candidate').onSnapshot(snapshot => {
+                const data = snapshot.data();
+                if (data && data.candidate) {
+                    const candidate = new RTCIceCandidate(data.candidate);
+                    peerConnection.addIceCandidate(candidate);
+                }
+            });
+        }
+
+        // Answer call
+        async function answerCall() {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            remoteStream = new MediaStream();
+
+            document.getElementById('localVideo').srcObject = localStream;
+            document.getElementById('remoteVideo').srcObject = remoteStream;
+
+            peerConnection = new RTCPeerConnection(servers);
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            peerConnection.ontrack = event => {
+                event.streams[0].getTracks().forEach(track => {
+                    remoteStream.addTrack(track);
+                });
+            };
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    db.collection('calls').doc('ice-candidate').set({
+                        candidate: event.candidate
+                    });
+                }
+            };
+
+            const callDoc = db.collection('calls').doc('offer');
+            const offerData = (await callDoc.get()).data();
+            const offerDescription = new RTCSessionDescription({
+                type: 'offer',
+                sdp: offerData.sdp
+            });
+            await peerConnection.setRemoteDescription(offerDescription);
+
+            const answerDescription = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answerDescription);
+
+            db.collection('calls').doc('answer').set({
+                type: 'answer',
+                sdp: answerDescription.sdp
+            });
+        }
+
+        // Listen for calls
+        db.collection('calls').doc('offer').onSnapshot(snapshot => {
+            if (snapshot.exists) {
+                answerCall();
+            }
+        });
+    </script>
+</body>
+</html>
